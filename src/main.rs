@@ -1,5 +1,6 @@
 use std::io::{stdout, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::sleep;
 use std::time::Duration;
 use std::{fmt, thread};
@@ -53,13 +54,20 @@ fn main() {
     dbg!(&traffic_data);
     draw_char_map(&traffic_data);
 
+    let (req_tx, req_rx) = mpsc::channel();
+    let (data_tx, data_rx) = mpsc::channel();
+
     // periodically move the aircrafts
     let handle = thread::spawn(move || {
         let mut skip_counter = 0;
         loop {
+            if let Ok(_) = req_rx.try_recv() {
+                data_tx.send(traffic_data.clone()).unwrap();
+            }
+
             if skip_counter == 3 {
                 move_aircrafts(&mut traffic_data);
-                draw_char_map(&traffic_data)    ;
+                draw_char_map(&traffic_data);
                 skip_counter = 0;
             } else {
                 skip_counter += 1;
@@ -69,8 +77,6 @@ fn main() {
         }
     });
 
-    // other code to run...
-
     // now run the REST API server
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 3000)))
         .expect("Unable to bind to port 3000");
@@ -79,7 +85,7 @@ fn main() {
 
     for stream_result in listener.incoming() {
         if let Ok(stream) = stream_result {
-            process_stream(stream);
+            process_stream(stream, &req_tx, &data_rx);
         }
     }
 
@@ -232,9 +238,14 @@ fn move_aircrafts(data_set: &mut Vec<Flight>) {
     }
 }
 
-fn process_stream(mut stream: TcpStream) {
+fn process_stream(
+    mut stream: TcpStream,
+    data_requester: &Sender<()>,
+    data_receiver: &Receiver<Vec<Flight>>,
+) {
     let http_request = read_http_request(&mut stream);
-
+    let latest_traffic_data = get_latest_traffic_data(data_requester, data_receiver);
+    dbg!(&latest_traffic_data);
     send_http_response(&mut stream);
 }
 
@@ -266,4 +277,16 @@ fn send_http_response(stream: &mut TcpStream) {
     let http_response = format!("{}\r\n{}\r\n{}", response_line, headers, payload);
 
     stream.write_all(http_response.as_bytes()).unwrap();
+}
+
+fn get_latest_traffic_data(
+    data_requester: &Sender<()>,
+    data_receiver: &Receiver<Vec<Flight>>,
+) -> Option<Vec<Flight>> {
+    data_requester.send(()).unwrap();
+
+    match data_receiver.recv() {
+        Ok(data) => Some(data),
+        Err(_) => None,
+    }
 }
